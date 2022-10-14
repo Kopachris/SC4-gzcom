@@ -1,0 +1,160 @@
+    int InitializeNames()
+    {
+        /*
+        * File format:
+        * 
+        * Each name on a new line. Sections specified by special characters. Section continues until a new section specifier or EOF.
+        * Therefore,
+        * Names cannot start with: ~, ~^, +, -, <, >, ;, or *
+        * Names cannot contain: ;
+        * 
+        * The file is split by line, but afterwards whitespace is stripped before identification and processing.
+        * 
+        * Buildings which do not have any occupant groups listed in their exemplar that are defined in this file will
+        * be ignored/excluded by default, unless they match a specific name. Chances of choosing a particular name can
+        * be adjusted by listing that name multiple times in the same match section.
+        * 
+        * ~<uint32>			following names apply to occupant group <uint32> (follows stoui rules for base detection)
+        * ~^<regex>			following names apply to occupant names matching the given regex, including the initial ^ (BOL anchor), requires an occupant group
+        * ~<string>			following names apply to a specific building occupant name, overriding occupant groups (basically if no int or regex)
+        * +<uint32>         following names apply to this occupant group in addition to previously set occupant group(s) (i.e. must have both/all declared in this section)
+        * +<string>			following names apply to a specific occupant name, added to currently set occupant groups
+        * ++<string>        specified string should be added to previous name with a space between (mainly for use with results of URL lines)
+        * -<uint32>			following building occupant names in this occupant group should be excluded from randomization
+        * **				when used the within a -<uint32> header, indicates exclude ALL occupants with this group, even if
+        *					they are in another defined group or have an exact name match
+        * *<uint16_t>       add preceding name to the list the given number of times, for controlling probabilities, works with URL inputs as well
+        * >https://url.com  get a URL and parse its contents as JSON. Will use the "name" attribute of the returned JSON by default, see "URL inputs" below
+        * ;<string>			line comment. Can also go after data on a line, the rest of the line will be ignored.
+        * **PRIORITIES**	(literal, not case-sensitive) following <uint32> lines define occupant group priorities 
+        *					if a building occupant is in multiple defined groups. Specific original building occupant names
+        *					that are defined with '~' always take priority over any occupant group definitions.
+        * <example.txt		include another file at this point (note, see "**PRIORITIES**" below)
+        * <!                do not include default files. Only valid within region folders because it's mainly only saying to skip:
+        *                       the region file auto-include (if used in a city names file)
+        *                       the plugins directory auto-includes
+        *                       the main auto-include at the Documents\SimCity 4\ directory level, which by default includes another file containing SC4 default names
+        *                   if this is used, then any other files you want to include must be done explicitly
+        * 
+        * There shall be a special case for a ~<uint32> line followed by a ~^<regex< or ~<string> line with no other lines between:
+        * These will indicate the string or regex is subordinate to the given occupant group ID. For performance reasons, regex match
+        * definitions must be paired with an occupant group ID. These always override a plain occupant group definition
+        * or a plain string/regex definition. So if you have a section of names for occupant group 0x11010 (R$)
+        * and a separate section of names for the string "Apartments", then such a combination section of 0x11010 and "Apartments"
+        * will take precedence. If an occupant matches multiple such combination section specifiers, we should use the first matching
+        * one that's loaded, unless **PRIORITIES** are set in any loaded file (see "**PRIORITIES**" below). For included files, that 
+        * means the file that's including the other takes precedence. Within a file, a match definition that's earlier in the file 
+        * will take precedence over one later in the file. Load order for auto-inclusion should go:
+        * 
+        * Region folder (region-specific names) > plugins folder (names added by other mods) > user data folder (global and default names)
+        * Match definitions and names will be added to each other. Names can appear multiple times within a match definition to adjust
+        * probabilities. If the same match definition is present in multiple files, their lists of names will simply be combined.
+        * 
+        * The match definition objects should be stored in a couple std::map objects keyed with the occupant group (uint32) and the
+        * occupant name (std::string), each storing the appropriate types of match definition objects. Combined occupant group and
+        * exact string (kcOccGroupStringMatch) goes in the occupant group map. We'll also have to keep track of exclusions mapped by
+        * occupant group. If, while parsing the files, we encounter a completely excluded group with "**", then that's the only element
+        * we need in that group's exclusion list (just assign, don't append).
+        * 
+        * So then for each building occupant we work on, we first check if it should be excluded and we make a list of match definitions to 
+        * try. First we get the building's occupant groups. If any of those occupant groups are in the exclusion mapping, check if its
+        * exclusion list is just {"**"} (exclude, return from the randomizeOne() function), and if not, then check if this occupant's name
+        * is in any of those matching exclusion lists.
+        * 
+        * Next, for each of the building's occupant groups, we get the list of match definitions for it from that mapping, leaving out
+        * group + name definitions that don't match this occupant's name. Next we add the match definition for the exact name, if one exists
+        * in the mapping. Then we can sort the list of match definitions to try by priority by passing kcLotNamerMatch::cmp to std::sort, and
+        * finally iterate through the list, calling checkMatch() until a match is found.
+        * 
+        * **PRIORITIES**:
+        * ===============
+        * This plugin also has the ability to specify that certain occupant groups or explicit names should take precedence over others 
+        * regardless of load order. This changes the behavior of the priority assignment on load and check. As files are loaded, if a 
+        * **PRIORITIES** section is encountered, it will be stored. Any **PRIORITIES** section found later in the load order will be ignored 
+        * (since we're loading from most specific, city, to least specific, global). If a **PRIORITIES** section was found, then after all files 
+        * are loaded the priorities of the listed match definitions will be reassigned, all placed before any match definitions not listed in the
+        * **PRIORITIES** section. As part of this, match priority modifiers are also changed: 0x8000 (decimal 32768) will be added to definitions
+        * listed in this section. You can use this to, for example, set a particular name or occupant group above all others in priority, or give
+        * defined exact name matches higher priority than regex matches (which require combination with an occupant group, making them by default
+        * more specific and higher priority. Note however, that regex matches will be included with their occupant group if it's listed in this
+        * section, getting the same change to their priority modifiers. So that means that in this **PRIORITIES** section:
+        * 
+        * **PRIORITIES**
+        * Cousin Vinnie's Place
+        * 0x11010
+        * 
+        * The name list for the exact name match "Cousin Vinnie's Place" will override any regex match definitions that it also matches unless
+        * the building belongs to occupant group 0x11010 (R$).
+        * 
+        * URL inputs:
+        * ===========
+        * A name starting with '>' indicates it should be parsed as a URL plus a JSON pointer. The JSON pointer should be separated from the URL
+        * with one or more spaces or tab characters, so the URL needs to already be percent-encoded. Example:
+        * 
+        * >https://api.namefake.com/japanese-japan/random/      /company
+        * 
+        * You can use the ++ line prefix to indicate two name lines should be concatenated. Behind the scenes, the lines will be stored
+        * in the same object. For this version, this is only really useful with URL name lines. You can use this on the URL line itself 
+        * to add a prefix to it (the preceding name line), or you can use it on the following line to add a suffix. When concatenating, 
+        * a space will be added between, so no need to add your own. Examples:
+        * 
+        * House of
+        * ++>https://api.namefake.com/      /name
+        * 
+        * or
+        * 
+        * >https://api.namefake.com/        /maiden_name
+        * ++Household
+        * 
+        * You can further specify a slice of the reulting string from the JSON object, or (probably more useful) even a regex match.
+        * This should be separated from the JSON pointer with one or more spaces or tab characters. If using regex, you must specify
+        * a capture group. Like with a regex-based occupant name match, the operator for this (^) is included in the regex string,
+        * so you MUST craft your regexes with that beginning anchor in mind. Examples:
+        * 
+        * ; get only the last name
+        * >https://api.namefake.com/        /name       ^.*\b(\w+)$
+        * ++Household
+        * 
+        * ; get only first 10 characters
+        * >https://api.namefake.com/        /name       0   10
+        * 
+        * ; get only the last 10 characters
+        * >https://api.namefake.com/        /name       -10   10
+        * 
+        * ; get 7 characters in the middle starting with the 6th character (0-indexed)
+        * >https://api.namefake.com/        /name       5   7
+        * 
+        * A negative number in the length of a string slice is invalid, but a negative number in the position indicates to start
+        * that many characters from the end of the string.
+        *
+        * If you're going to use a URL-based name definition to get random names alongside a list of names, you may want to control the
+        * probabilities choosing one (or each) of your static names compared to grabbing one from the URL. This is done with the * line prefix
+        * on the following line. Example:
+        * 
+        * ~0x11010      ; R$, low-wealth residential
+        * ; get only the last name
+        * >https://api.namefake.com/english-united-states/random        /name       ^.*\b(\w+)$
+        * ++Household
+        * *60        ; adds to the choice list 60 times
+        * Cousin Bob's Place        ; adds to the choice list once
+        * Humble Holt's Abode
+        * Kilburn Kottage
+        * Crib Terrace
+        * *5
+        * Hi-Life Hut
+        * *5
+        * >https://api.namefake.com/german_germany/random        /name       ^.*\b(\w+)$        ; namefake.com is inconsistent with their URLs, not me
+        * ++Haus
+        * *10
+        * >https://api.namefake.com/german_austria/random        /name       ^.*\b(\w+)$
+        * ++Haus
+        * *2
+        * Casa de
+        * ++>https://api.namefake.com/spanish-spain/random        /name       ^.*\b(\w+)$
+        * *15
+        * 
+        * This example should have 100 total choices for the specified occupant group with the following probabilities: 60% American English surname
+        * plus "Household", 12% a Germanic (German or Austrian) surname plus "Haus", 15% the words "Casa de" plus a Spanish surname, and 1% chance each
+        * of three different names from the base (deluxe?) game.
+*/
+}

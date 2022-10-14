@@ -1,5 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <Project DefaultTargets="Build" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="..\packages\libcpr.1.9.2\build\native\libcpr.props" Condition="Exists('..\packages\libcpr.1.9.2\build\native\libcpr.props')" />
   <ItemGroup Label="ProjectConfigurations">
     <ProjectConfiguration Include="Debug|Win32">
       <Configuration>Debug</Configuration>
@@ -98,7 +99,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <LanguageStandard>stdcpp20</LanguageStandard>
+      <LanguageStandard>stdcpplatest</LanguageStandard>
       <LanguageStandard_C>stdc17</LanguageStandard_C>
       <CallingConvention>Cdecl</CallingConvention>
     </ClCompile>
@@ -159,6 +160,7 @@
     <ClCompile Include="kcGZLotNamer.cpp" />
     <ClCompile Include="SG_InputBox.cpp" />
     <ClCompile Include="stdafx.cpp" />
+    <ClCompile Include="strtrim.cpp" />
     <ClCompile Include="utils.cpp" />
   </ItemGroup>
   <ItemGroup>
@@ -272,10 +274,26 @@
     <ClInclude Include="include\SC4Rect.h" />
     <ClInclude Include="SG_InputBox.h" />
     <ClInclude Include="stdafx.h" />
+    <ClInclude Include="strtrim.h" />
     <ClInclude Include="targetver.h" />
     <ClInclude Include="utils.h" />
   </ItemGroup>
+  <ItemGroup>
+    <None Include="packages.config" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
+    <Import Project="..\packages\openssl-vc142.1.1.0\build\native\openssl-vc142.targets" Condition="Exists('..\packages\openssl-vc142.1.1.0\build\native\openssl-vc142.targets')" />
+    <Import Project="..\packages\libcpr.1.9.2\build\native\libcpr.targets" Condition="Exists('..\packages\libcpr.1.9.2\build\native\libcpr.targets')" />
+    <Import Project="..\packages\tencent.rapidjson.1.1.1\build\tencent.rapidjson.targets" Condition="Exists('..\packages\tencent.rapidjson.1.1.1\build\tencent.rapidjson.targets')" />
   </ImportGroup>
+  <Target Name="EnsureNuGetPackageBuildImports" BeforeTargets="PrepareForBuild">
+    <PropertyGroup>
+      <ErrorText>This project references NuGet package(s) that are missing on this computer. Use NuGet Package Restore to download them.  For more information, see http://go.microsoft.com/fwlink/?LinkID=322105. The missing file is {0}.</ErrorText>
+    </PropertyGroup>
+    <Error Condition="!Exists('..\packages\openssl-vc142.1.1.0\build\native\openssl-vc142.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\openssl-vc142.1.1.0\build\native\openssl-vc142.targets'))" />
+    <Error Condition="!Exists('..\packages\libcpr.1.9.2\build\native\libcpr.props')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\libcpr.1.9.2\build\native\libcpr.props'))" />
+    <Error Condition="!Exists('..\packages\libcpr.1.9.2\build\native\libcpr.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\libcpr.1.9.2\build\native\libcpr.targets'))" />
+    <Error Condition="!Exists('..\packages\tencent.rapidjson.1.1.1\build\tencent.rapidjson.targets')" Text="$([System.String]::Format('$(ErrorText)', '..\packages\tencent.rapidjson.1.1.1\build\tencent.rapidjson.targets'))" />
+  </Target>
 </Project>
