@@ -16,6 +16,7 @@
         * 
         * ~<uint32>			following names apply to occupant group <uint32> (follows stoui rules for base detection)
         * ~^<regex>			following names apply to occupant names matching the given regex, including the initial ^ (BOL anchor), requires an occupant group
+        * ~%<regex>         following names apply to occupant names partially matching the given regex, no default BOL anchor, also requires an occupant group
         * ~<string>			following names apply to a specific building occupant name, overriding occupant groups (basically if no int or regex)
         * +<uint32>         following names apply to this occupant group in addition to previously set occupant group(s) (i.e. must have both/all declared in this section)
         * +<string>			following names apply to a specific occupant name, added to currently set occupant groups
