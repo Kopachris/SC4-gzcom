@@ -16,6 +16,7 @@
 #include "include/cISC4App.h"
 //#include "include/cISC4BuildingDevelopmentSimulator.h"
 #include "include/cISC4City.h"
+#include "include/cISC4Region.h"
 #include "include/cISC4Lot.h"
 //#include "include/cISC4LotConfiguration.h"
 //#include "include/cISC4LotConfigurationManager.h"
@@ -32,10 +33,13 @@
 #include "include/GZServPtrs.h"
 //#include "include/SC4Rect.h"
 //#include <list>
+#include <set>
 #include <string>
+#include <locale>
 #include <cstdio>
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <format>
 #include <regex>
 #include <algorithm>
@@ -85,21 +89,66 @@ static const uint32_t kKCLotNamerPluginCOMDirectorID = 0x44d0baa0;
 static const uint32_t kKCCheatRandomizeNames = 0x44ccbaa0;
 static const char* kszKCCheatRandomizeNames = "NameGame";
 
+static const uint32_t MATCHTGT_OCCGROUP = 1;        // MATCHTGT = the target mapping to add this definition to (the important one)
+static const uint32_t MATCHTGT_NAME = 1 << 1;
+static const uint32_t MATCHTYPE_INT = 1 << 15;      // MATCHTYPE = the main type of match being made (not used)
+static const uint32_t MATCHTYPE_STRING = 1 << 16;
+static const uint32_t MATCHTYPE_REGEX = 1 << 17;
+static const uint32_t MATCHMOD_EXCEPTIONS = 1 << 30;    // MATCHMOD = any modifier signifying flags (not used)
+static const uint32_t MATCHMOD_PARTIAL = 1 << 31;   
+
+static const char* kCitySpecialFileName = "??CITY";     // allows plugin-included files with same name as the city names def file
+static const char* kRegionSpecialFileName = "??REGION";
+static const char* kDefaultSpecialFileName = "??DEFAULT";
+
 #ifdef _DEBUG
 static const char* dbgOccupantLog = "C:\\occupants.log";
 #endif
 
 static const char* namesListFilename = "kcGZLotNamer_names.txt";
+static const char* DOTNAMES = ".namedef";       // file extension for our name definition files--this is easier than the prefix idea I think
 constexpr auto hexfmt = "{:#010x}";
 #define HEXFMT(x) std::format("{:#010x}", x)
 
 namespace json = rapidjson;
 namespace requests = cpr;           // lul, it's modeled after Python's requests, may as well call it that
+namespace pathlib = std::filesystem;
 using clock = std::chrono::steady_clock;
 using dt = std::chrono::time_point<clock>;      // datetime
 using td = std::chrono::duration<double, std::ratio<1>>;        // timedelta in seconds
 
 using namespace std::literals;      // for duration literals e.g. 60s
+
+// easier generic contains on a vector
+template<class T, class V = std::vector<T>>
+bool kContains(V& haystack, T& needle, bool sensitive = true)
+{
+    if (sensitive)
+    {
+        return std::any_of(haystack.begin(), haystack.end(), [needle](T& x) { return x == needle; });
+    }
+    else
+    {
+        l = std::locale();
+        return std::any_of(haystack.begin(), haystack.end(), [needle](T& x) {return std::toupper(x, l) == std::toupper(needle, l); });
+    }
+}
+
+// likewise for extending a vector
+template<class T>
+void iextend(std::vector<T>& first, std::vector<T>& other)
+{
+    std::for_each(other.begin(), other.end(), [first](T o) { first.push_back(o); });
+}
+
+template<class T>
+std::vector<T> extend(std::vector<T>& first, std::vector<T>& other)
+{
+    std::vector<T> new_first = first;
+    iextend(new_first, other);
+}
+
+//using std::vector::contains;
 
 // Random number generator wrapper
 // Uses MT19937 (32-bit Mersenne Twister) with default settings, seeded by the system random device
@@ -452,7 +501,7 @@ class kcLotNamerMatch
 {
 public:
 
-    std::vector<kcNameChoice> names;
+    static const uint32_t match_flags = 0x00;
 
     kcLotNamerMatch() { };
 
@@ -477,6 +526,16 @@ public:
     std::string getOneStr()
     {
         return names[g_random.rand_int(names.size())].getName();
+    }
+
+    void addOne(kcNameChoice &nc)
+    {
+        names.push_back(nc);
+    }
+
+    void addMany(std::vector<kcNameChoice>& ncs)
+    {
+        std::for_each(ncs.begin(), ncs.end(), [this](kcNameChoice& nc) { addOne(nc); });
     }
 
     // return true if this should take priority over other
@@ -510,6 +569,7 @@ public:
 protected:
     const static uint16_t priorityMod = 0;      // meant to give certain classes of match absolute priority over others (e.g. due to specificity)
     uint16_t priority = 0;
+    std::vector<kcNameChoice> names;
 };
 
 // Match based on occupant group ID:
@@ -517,6 +577,8 @@ protected:
 class kcOccGroupLotNamerMatch : public kcLotNamerMatch
 {
 public:
+
+    static const uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTYPE_INT;
 
     kcOccGroupLotNamerMatch(uint32_t iOccupantGroup, std::vector<kcNameChoice> inames)
     {
@@ -546,6 +608,8 @@ protected:
 class kcStringLotNamerMatch : public kcLotNamerMatch
 {
 public:
+
+    static const uint32_t match_flags = MATCHTGT_NAME | MATCHTYPE_STRING;
 
     kcStringLotNamerMatch(std::string iMatchName, std::vector<kcNameChoice> inames)
     {
@@ -590,6 +654,8 @@ class kcPartialOccGroupRegexMatch : public kcLotNamerMatch
     // this is a version of the occupant group + regex match that doesn't require a full match (usually requiring at least a BOL anchor)
 public:
 
+    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTYPE_REGEX | MATCHMOD_PARTIAL;
+
     kcPartialOccGroupRegexMatch(uint32_t iOccupantGroup, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
     {
         names = inames;
@@ -609,12 +675,14 @@ public:
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
+        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
         {
             cRZBaseString thisOccupantName;
             bOccupant->GetName(thisOccupantName);
-            return std::regex_search(thisOccupantName.ToChar(), rxMatchName) && thisOccupant->IsOccupantGroup(dwOccupantGroup);
+            return std::regex_search(thisOccupantName.ToChar(), rxMatchName);
         }
         else
         {
@@ -637,6 +705,8 @@ class kcOccGroupRegexMatch : public kcLotNamerMatch
 {
 public:
 
+    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTGT_NAME | MATCHTYPE_REGEX;
+
     kcOccGroupRegexMatch(uint32_t iOccupantGroup, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
     {
         names = inames;
@@ -654,12 +724,14 @@ public:
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
+        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
         {
             cRZBaseString thisOccupantName;
             bOccupant->GetName(thisOccupantName);
-            return std::regex_match(thisOccupantName.ToChar(), rxMatchName) && thisOccupant->IsOccupantGroup(dwOccupantGroup);
+            return std::regex_match(thisOccupantName.ToChar(), rxMatchName);
         }
         else
         {
@@ -681,6 +753,8 @@ class kcOccGroupStringMatch : public kcLotNamerMatch
 {
 public:
 
+    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTGT_NAME | MATCHTYPE_STRING;
+
     kcOccGroupStringMatch(uint32_t iOccupantGroup, std::string iMatchString, std::vector<kcNameChoice> inames)
     {
         names = inames;
@@ -698,6 +772,8 @@ public:
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
+        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
         {
@@ -705,7 +781,7 @@ public:
             bOccupant->GetName(thisOccupantName);
 
             // let's try going case-insensitive for now
-            return thisOccupantName.CompareTo(cRZBaseString(szMatchName), true) && thisOccupant->IsOccupantGroup(dwOccupantGroup);
+            return thisOccupantName.CompareTo(cRZBaseString(szMatchName), true);
         }
         else
         {
@@ -720,9 +796,94 @@ protected:
     uint32_t dwOccupantGroup;
 };
 
+// This class, instead of using the names variable to return a name, uses it in checkMatch()
+// getOne() and getOneStr() are overridden to return an empty cRZBaseString and an empty std::string, respectively
+class kcLotNamerExclusions : public kcLotNamerMatch
+{
+public:
+    std::vector<std::string> names;
+    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHMOD_EXCEPTIONS;
+
+    kcLotNamerExclusions(uint32_t iOccupantGroup, std::vector<std::string> inames)
+    {
+        //if (std::any_of(inames.begin(), inames.end(), [](std::string n) { return n == "**"; }))
+        if (kContains(inames, "**"))
+        {
+            names = std::vector { std::string("**") };
+            match_all = true;
+        }
+        else
+        {
+            names = inames;
+        }
+        dwOccupantGroup = iOccupantGroup;
+    }
+
+    cRZBaseString getOne() { return cRZBaseString(""); }
+    std::string getOneStr() { return ""; }
+
+    void addOne(std::string& nc)
+    {
+        if (match_all) return;
+
+        if (nc == "**")
+        {
+            names = std::vector{ std::string("**") };
+            match_all = true;
+        }
+        else
+        {
+            names.push_back(nc);
+        }
+    }
+
+    void addMany(std::vector<std::string>& ncs)
+    {
+        if (match_all) return;
+
+        iextend(names, ncs);
+    }
+
+    bool checkMatch(cISC4Occupant* thisOccupant)
+    {
+        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+
+        if (match_all) return true;
+
+        cISC4BuildingOccupant* bOccupant;
+        std::string this_name;
+        if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
+        {
+            cRZBaseString thisOccupantName;
+            bOccupant->GetName(thisOccupantName);
+
+            this_name = thisOccupantName.ToChar();
+        }
+        else
+        {
+            DBGMSG("Unable to get BuildingOccupant interface when expecting a building occupant in kcLotNamerExclusions.checkMatch().");
+            return false;
+        }
+
+        return kContains(names, this_name, false);
+
+    }
+
+protected:
+    const static uint16_t priorityMod = 0;
+    uint32_t dwOccupantGroup;
+    bool match_all = false;     // match all names in this occ group
+};
+
 class kcGZLotNamerPluginCOMDirector : public cRZMessage2COMDirector
 {
 public:
+
+    pathlib::path userDataDirectory = "%USERPROFILE%\\Documents\\SimCity 4";
+    pathlib::path userPluginDirectory = "%USERPROFILE%\\Documents\\SimCity 4\\Plugins";
+    pathlib::path userRegionsDirectory = "%USERPROFILE%\\Documents\\SimCity 4\\Regions";
+    pathlib::path currentRegionDirectory;
+    std::string currentCityName;
 
     kcGZLotNamerPluginCOMDirector() { }
 
@@ -805,21 +966,21 @@ public:
         pISC4App->GetUserDataDirectory(userDataDir);
         if (userDataDir.Strlen())
         {
-            userDataDirectory = (std::string)userDataDir.ToChar();
+            userDataDirectory = pathlib::canonical(userDataDir.ToChar());
         }
 
         cRZBaseString userPluginsDir;
         pISC4App->GetUserPluginDirectory(userPluginsDir);
         if (userPluginsDir.Strlen())
         {
-            userPluginDirectory = (std::string)userPluginsDir.ToChar();
+            userPluginDirectory = pathlib::canonical(userPluginsDir.ToChar());
         }
 
         cRZBaseString regionDir;
         pISC4App->GetRegionsDirectory(regionDir);
         if (regionDir.Strlen())
         {
-            userRegionsDirectory = (std::string)regionDir.ToChar();
+            userRegionsDirectory = pathlib::canonical(regionDir.ToChar());
         }
 
         // register for messages
@@ -853,8 +1014,14 @@ public:
 
         if (dwType == kGZMSG_CityInited)
         {
+            // City loaded, lets initialize our names
             cISC4City* thisCity = thisApp->GetCity();
             cISC4Region* thisRegion = thisApp->GetRegion();
+            pathlib::path regDirName = thisRegion->GetDirectoryName();
+            currentRegionDirectory = pathlib::canonical(userRegionsDirectory / regDirName);
+            cRZBaseString citName;
+            thisCity->GetCityName(citName);
+            currentCityName = citName.ToChar();
             if (InitializeNames() < 1)
             {
                 DBGMSG("Failed to initialize names.");
@@ -896,13 +1063,10 @@ public:
 
 protected:
 
-    std::map<int, std::vector<std::string>> namesByOccupantGroup;
-    std::map<std::string, std::vector<std::string>> namesByDirectName;
+    std::map<int, std::vector<kcLotNamerMatch>> namesByOccupantGroup;
+    std::map<std::string, std::vector<kcLotNamerMatch>> namesByDirectName;
     std::vector<int> occupantGroupPriorities;
-    std::map<int, std::vector<std::string>> exclusionsByOccupantGroup;
-    std::string userDataDirectory = "%USERPROFILE%\\Documents\\SimCity 4";
-    std::string userPluginDirectory = "%USERPROFILE%\\Documents\\SimCity 4\\Plugins";
-    std::string userRegionsDirectory = "%USERPROFILE%\\Documents\\SimCity 4\\Regions";
+    std::map<int, kcLotNamerExclusions> exclusionsByOccupantGroup;
     cISC4App* thisApp;
 
     // right now this is just debugging stuff
@@ -995,194 +1159,81 @@ protected:
 
     int InitializeNames()
     {
-        // Should we use the plugin data directory instead of the user data directory?
-        // That might allow other mods to add their own...
         /*
-        * File format:
         * 
-        * Each name on a new line. Sections specified by special characters. Section continues until a new section specifier or EOF.
-        * Therefore,
-        * Names cannot start with: ~, ~^, +, -, <, >, ;, or *
-        * Names cannot contain: ;
-        * 
-        * The file is split by line, but afterwards whitespace is stripped before identification and processing.
-        * 
-        * Buildings which do not have any occupant groups listed in their exemplar that are defined in this file will
-        * be ignored/excluded by default, unless they match a specific name. Chances of choosing a particular name can
-        * be adjusted by listing that name multiple times in the same match section.
-        * 
-        * ~<uint32>			following names apply to occupant group <uint32> (follows stoui rules for base detection)
-        * ~^<regex>			following names apply to occupant names matching the given regex, including the initial ^ (BOL anchor), requires an occupant group
-        * ~<string>			following names apply to a specific building occupant name, overriding occupant groups (basically if no int or regex)
-        * +<uint32>         following names apply to this occupant group in addition to previously set occupant group(s)
-        * +<string>			following names apply to a specific building occupant name, added to currently set occupant groups
-        * ++<string>        specified string should be added to previous name with a space between (mainly for use with results of URL lines)
-        * -<uint32>			following building occupant names in this occupant group should be excluded from randomization
-        * **				when used the within a -<uint32> header, indicates exclude ALL occupants with this group, even if
-        *					they are in another defined group or have an exact name match
-        * *<uint16_t>       add preceding name to the list the given number of times, for controlling probabilities, works with URL inputs as well
-        * >https://url.com  get a URL and parse its contents as JSON. Will use the "name" attribute of the returned JSON by default, see "URL inputs" below
-        * ;<string>			line comment. Can also go after data on a line, the rest of the line will be ignored.
-        * **PRIORITIES**	(literal, not case-sensitive) following <uint32> lines define occupant group priorities 
-        *					if a building occupant is in multiple defined groups. Specific original building occupant names
-        *					that are defined with '~' always take priority over any occupant group definitions.
-        * <example.txt		include another file at this point (note, see "**PRIORITIES**" below)
-        * <!                do not include default files. Only valid within region folders because it's mainly only saying to skip:
-        *                       the region file auto-include (if used in a city names file)
-        *                       the plugins directory auto-includes
-        *                       the main auto-include at the Documents\SimCity 4\ directory level, which by default includes another file containing SC4 default names
-        *                   if this is used, then any other files you want to include must be done explicitly
-        * 
-        * There shall be a special case for a ~<uint32> line followed by a ~^<regex< or ~<string> line with no other lines between:
-        * These will indicate the string or regex is subordinate to the given occupant group ID. For performance reasons, regex match
-        * definitions must be paired with an occupant group ID. These always override a plain occupant group definition
-        * or a plain string/regex definition. So if you have a section of names for occupant group 0x11010 (R$)
-        * and a separate section of names for the string "Apartments", then such a combination section of 0x11010 and "Apartments"
-        * will take precedence. If an occupant matches multiple such combination section specifiers, we should use the first matching
-        * one that's loaded, unless **PRIORITIES** are set in any loaded file (see "**PRIORITIES**" below). For included files, that 
-        * means the file that's including the other takes precedence. Within a file, a match definition that's earlier in the file 
-        * will take precedence over one later in the file. Load order for auto-inclusion should go:
-        * 
-        * Region folder (region-specific names) > plugins folder (names added by other mods) > user data folder (global and default names)
-        * Match definitions and names will be added to each other. Names can appear multiple times within a match definition to adjust
-        * probabilities. If the same match definition is present in multiple files, their lists of names will simply be combined.
-        * 
-        * The match definition objects should be stored in a couple std::map objects keyed with the occupant group (uint32) and the
-        * occupant name (std::string), each storing the appropriate types of match definition objects. Combined occupant group and
-        * exact string (kcOccGroupStringMatch) goes in the occupant group map. We'll also have to keep track of exclusions mapped by
-        * occupant group. If, while parsing the files, we encounter a completely excluded group with "**", then that's the only element
-        * we need in that group's exclusion list (just assign, don't append).
-        * 
-        * So then for each building occupant we work on, we first check if it should be excluded and we make a list of match definitions to 
-        * try. First we get the building's occupant groups. If any of those occupant groups are in the exclusion mapping, check if its
-        * exclusion list is just {"**"} (exclude, return from the randomizeOne() function), and if not, then check if this occupant's name
-        * is in any of those matching exclusion lists.
-        * 
-        * Next, for each of the building's occupant groups, we get the list of match definitions for it from that mapping, leaving out
-        * group + name definitions that don't match this occupant's name. Next we add the match definition for the exact name, if one exists
-        * in the mapping. Then we can sort the list of match definitions to try by priority by passing kcLotNamerMatch::cmp to std::sort, and
-        * finally iterate through the list, calling checkMatch() until a match is found.
-        * 
-        * **PRIORITIES**:
-        * ===============
-        * This plugin also has the ability to specify that certain occupant groups or explicit names should take precedence over others 
-        * regardless of load order. This changes the behavior of the priority assignment on load and check. As files are loaded, if a 
-        * **PRIORITIES** section is encountered, it will be stored. Any **PRIORITIES** section found later in the load order will be ignored 
-        * (since we're loading from most specific, city, to least specific, global). If a **PRIORITIES** section was found, then after all files 
-        * are loaded the priorities of the listed match definitions will be reassigned, all placed before any match definitions not listed in the
-        * **PRIORITIES** section. As part of this, match priority modifiers are also changed: 0x8000 (decimal 32768) will be added to definitions
-        * listed in this section. You can use this to, for example, set a particular name or occupant group above all others in priority, or give
-        * defined exact name matches higher priority than regex matches (which require combination with an occupant group, making them by default
-        * more specific and higher priority. Note however, that regex matches will be included with their occupant group if it's listed in this
-        * section, getting the same change to their priority modifiers. So that means that in this **PRIORITIES** section:
-        * 
-        * **PRIORITIES**
-        * Cousin Vinnie's Place
-        * 0x11010
-        * 
-        * The name list for the exact name match "Cousin Vinnie's Place" will override any regex match definitions that it also matches unless
-        * the building belongs to occupant group 0x11010 (R$).
-        * 
-        * URL inputs:
-        * ===========
-        * A name starting with '>' indicates it should be parsed as a URL plus a JSON pointer. The JSON pointer should be separated from the URL
-        * with one or more spaces or tab characters, so the URL needs to already be percent-encoded. The JSON pointer should also be in URI fragment
-        * encoding, also percent-encoded. The JSON pointer should therefore start with a hash symbol, but if it doesn't we will add one before
-        * having rapidjson interpret it as a pointer, but it still needs the slash, the "reference token". Example:
-        * 
-        * >https://api.namefake.com/japanese-japan/random/      #/company
-        * 
-        * You can use the ++ line prefix to indicate two name lines should be concatenated. Behind the scenes, the lines will be stored
-        * in the same object. For this version, this is only really useful with URL name lines. You can use this on the URL line itself 
-        * to add a prefix to it (the preceding name line), or you can use it on the following line to add a suffix. When concatenating, 
-        * a space will be added between, so no need to add your own. Examples:
-        * 
-        * House of
-        * ++>https://api.namefake.com/      #/name
-        * 
-        * or
-        * 
-        * >https://api.namefake.com/        #/maiden_name
-        * ++Household
-        * 
-        * You can further specify a slice of the reulting string from the JSON object, or (probably more useful) even a regex match.
-        * This should be separated from the JSON pointer with one or more spaces or tab characters. If using regex, you must specify
-        * a capture group. Like with a regex-based occupant name match, the operator for this (^) is included in the regex string,
-        * so you MUST craft your regexes with that beginning anchor in mind. Examples:
-        * 
-        * ; get only the last name
-        * >https://api.namefake.com/        #/name       ^.*\b(\w+)$
-        * ++Household
-        * 
-        * ; get only first 10 characters
-        * >https://api.namefake.com/        #/name       0   10
-        * 
-        * ; get only the last 10 characters
-        * >https://api.namefake.com/        #/name       -10   10
-        * 
-        * ; get 7 characters in the middle starting with the 6th character (0-indexed)
-        * >https://api.namefake.com/        #/name       5   7
-        * 
-        * A negative number in the length of a string slice is invalid, but a negative number in the position indicates to start
-        * that many characters from the end of the string.
-        * 
-        * If you're going to use a URL-based name definition to get random names alongside a list of names, you may want to control the
-        * probabilities choosing one (or each) of your static names compared to grabbing one from the URL. This is done with the * line prefix
-        * on the following line. Example:
-        * 
-        * ~0x11010      ; R$, low-wealth residential
-        * ; get only the last name
-        * >https://api.namefake.com/english-united-states/random        /name       ^.*\b(\w+)$
-        * ++Household
-        * *60        ; adds to the choice list 60 times
-        * Cousin Bob's Place        ; adds to the choice list once
-        * Humble Holt's Abode
-        * Kilburn Kottage
-        * Crib Terrace
-        * *5
-        * Hi-Life Hut
-        * *5
-        * >https://api.namefake.com/german_germany/random        /name       ^.*\b(\w+)$        ; namefake.com is inconsistent with their URLs, not me
-        * ++Haus
-        * *10
-        * >https://api.namefake.com/german_austria/random        /name       ^.*\b(\w+)$
-        * ++Haus
-        * *2
-        * Casa de
-        * ++>https://api.namefake.com/spanish-spain/random        /name       ^.*\b(\w+)$
-        * *15
-        * 
-        * This example should have 100 total choices for the specified occupant group with the following probabilities: 60% American English surname
-        * plus "Household", 12% a Germanic (German or Austrian) surname plus "Haus", 15% the words "Casa de" plus a Spanish surname, and 1% chance each
-        * of three different names from the base (deluxe?) game.
-        * 
-        * To do in a version 2.0?:
-        * Be able to split this file up by including named files in a base file. Will allow to separate the game's
-        *   default set of names into its own file.
-        * Be able to do this per-region, maybe after/as a city loads (on city loaded/load message?)
-        * ...eh, might add this into version 1.0 anyway as long as I've got it planned out well enough.
-        * 
-        * e.g. (for v. 2.0):
-        *	kcGZLotNamer_global.txt and kcGZLotNamer_default.txt in Documents\SimCity 4
-        *	kcGZLotNamer_names.txt in each Documents\SimCity 4\Regions\... folder, optionally including the default.txt
-        *	global can be empty, as any definitions present will be added to the region's file automatically without explicit inclusion
-        *	This method should keep track of included files and prevent duplication
-        *	The only directories that should be checked for included filenames are the UserDataDirectory and the current Region's directory
-        *	Maybe if a file is present named with the current city's name, we load that automatically first?
-        *	That would allow even more granularity!
-        * 
-        * To do in a version 3.0:
-        * Be able to do more advanced filtering both by name (regex?) and by other exemplar properties
-        * ...actually regex might be easier than I initially thought to implement with names, maybe even easier than globbing
-        * 
-        * How to:
+        * To do:
+        *   0. Initialize local copies of our main map variables
         *	1. Enumerate files to read
-        *	2. Open file for reading, and fgets() on it in a loop until EOF
-        *		i.		Trim whitespace from both sides
-        *		ii.		Check starting characters for section change
-        *		iii.	Change section context and section key variables when that happens
+        *       i.      Auto load <currentCityName>.namedef if it exists, plus any direct includes
+        *       ii.     Auto load <currentRegionDirectory>/region.namedef if it exists, plus any direct includes, unless excluded
+        *       iii.    Auto load any *.namedef in <userPluginsDirectory> if they exist, plus any direct includes, unless excluded
+        *       iv.     Auto load <userDataDirectory>/default.namedef if it exists, plus any direct includes, unless excluded
+        *           Nb. 1) We should keep track of loaded filenames to make sure they're only loaded once
+        *           Nb. 2) Mod authors should use includes in <userPluginsDirectory> for items in subdirectories, which otherwise wouldn't be auto-included
+        *           Nb. 3) Users are encouraged to rename our released <userDataDirectory>/default.namedef to e.g. built-in.namedef and include it (or not)
+        *                   from their own default.namedef or custom *.namedef if they want to define their own global set of names
+        *           Nb. 4) Included files follow a sort of namespace structure... they can only access files from their own directory, subdirectories, or
+        *                   the UserDataDirectory as a fallback. A city/region level namedef file can override files included by plugins by including a file
+        *                   with the same include name. That does mean subdirectories, too, though. So Regions\Berlin\region.namedef would have to include
+        *                   e.g. foo/bar = Regions\Berlin\foo\bar.namedef to override a plugin including foo/bar = Plugins\foo\bar.namedef.
+        *   2. Initialize file-level tracking variables
+        *	3. Open file for reading, and fgets() on it in a loop until EOF
+        *		i.		Trim whitespace from both sides (including newlines)
+        *		ii.		Check starting characters in if-elseif-else tree
+        *		iii.	Change local section context and section key variables as needed (swapping out with the local map variables as needed)
         *		iv.		Use section context and key to add lines to appropriate list if no special char match
         */
+
+        std::map<int, kcLotNamerExclusions> exclusions_map;
+        std::map<std::string, std::vector<kcLotNamerMatch>> namesByName_map;
+        std::map<int, std::vector<kcLotNamerMatch>> namesByGroup_map;
+
+        std::unordered_map<std::string, pathlib::path> includeFiles_map;      // maps requested include file name with found include file path
+        std::vector<std::string> includeFiles_list;         // just lists requested include file names in load order for enumeration of the map
+
+        // check city first
+        pathlib::path cityNames_path = currentRegionDirectory / (currentCityName + DOTNAMES);
+        if (pathlib::is_regular_file(cityNames_path))
+        {
+            includeFiles_map["??CITY"] = cityNames_path;
+            
+        }
+    }
+
+    std::vector<std::string> checkIncludes(pathlib::path this_filep)
+    {
+        // read a file, but just check for includes for now, we'll parse the namedefs on second pass
+    }
+
+    std::vector<std::string> checkIncludesRecursive(pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map)
+    {
+        // TODO: When you went to bed, you were trying to figure out how to properly implement this recursive include file search
+        std::vector<std::string> this_includes = checkIncludes(this_filep);
+        while (this_includes.size())        // THIS WON'T WORK
+        {
+            // resolve included file names to canonical paths
+            for (auto& inc : this_includes)     // Especially if I'm...
+            {
+                if (!inc_map.contains(inc))
+                {
+                    pathlib::path res_inc = resolveInclude(currentRegionDirectory, inc);
+                    inc_map[inc] = res_inc;
+
+                    // Overwriting this variable within the loop!
+                    this_includes = checkIncludesRecursive(res_inc, inc_map);
+                }
+            }
+        }
+    }
+
+    pathlib::path resolveInclude(pathlib::path folder, std::string include_name)
+    {
+        // get canonical path for an include name in the given namespace/folder
+    }
+
+    std::vector<kcLotNamerMatch> parseOne(pathlib::path this_filep)
+    {
+        // read a file and a return a vector of name match definitions to be sorted by the caller based on their flags
     }
 
     void RandomizeAll() { }
