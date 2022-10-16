@@ -1205,22 +1205,22 @@ protected:
         // read a file, but just check for includes for now, we'll parse the namedefs on second pass
     }
 
-    std::vector<std::string> checkIncludesRecursive(pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map)
+    void checkIncludesRecursive(pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map)
     {
         // TODO: When you went to bed, you were trying to figure out how to properly implement this recursive include file search
         std::vector<std::string> this_includes = checkIncludes(this_filep);
-        while (this_includes.size())        // THIS WON'T WORK
+        if (this_includes.size())
         {
             // resolve included file names to canonical paths
-            for (auto& inc : this_includes)     // Especially if I'm...
+            for (auto& inc : this_includes)
             {
                 if (!inc_map.contains(inc))
                 {
                     pathlib::path res_inc = resolveInclude(currentRegionDirectory, inc);
                     inc_map[inc] = res_inc;
 
-                    // Overwriting this variable within the loop!
-                    this_includes = checkIncludesRecursive(res_inc, inc_map);
+                    // aaaaand recurse! Shouldn't be any risk of an infinite loop since we're always checking if we've already added a particular include
+                    checkIncludesRecursive(res_inc, inc_map);
                 }
             }
         }
@@ -1229,6 +1229,7 @@ protected:
     pathlib::path resolveInclude(pathlib::path folder, std::string include_name)
     {
         // get canonical path for an include name in the given namespace/folder
+        
     }
 
     std::vector<kcLotNamerMatch> parseOne(pathlib::path this_filep)
