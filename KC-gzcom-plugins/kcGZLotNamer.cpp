@@ -48,6 +48,7 @@
 #include <cpr/cpr.h>
 #include <rapidjson/document.h>
 #include <rapidjson/pointer.h>
+#include "strtrim.h"
 
 #ifndef SIG_KOPA
 #define SIG_KOPA 0x4b4f5041
@@ -100,6 +101,8 @@ static const uint32_t MATCHMOD_PARTIAL = 1 << 31;
 static const char* kCitySpecialFileName = "??CITY";     // allows plugin-included files with same name as the city names def file
 static const char* kRegionSpecialFileName = "??REGION";
 static const char* kDefaultSpecialFileName = "??DEFAULT";
+static const char* kInvalidNamesFile = "??INVALIDFILE";     // tried to read as .namedef file but file was invalid for some reason
+static const char* kDisabledIncludes = "??NOINCLUDES";      // auto-inclusions have been disabled, explicit inclusions only from now on
 
 #ifdef _DEBUG
 static const char* dbgOccupantLog = "C:\\occupants.log";
@@ -118,6 +121,7 @@ using dt = std::chrono::time_point<clock>;      // datetime
 using td = std::chrono::duration<double, std::ratio<1>>;        // timedelta in seconds
 
 using namespace std::literals;      // for duration literals e.g. 60s
+using namespace strtrim;            // for string trimming helpers
 
 // easier generic contains on a vector
 template<class T, class V = std::vector<T>>
@@ -1176,6 +1180,10 @@ protected:
         *                   the UserDataDirectory as a fallback. A city/region level namedef file can override files included by plugins by including a file
         *                   with the same include name. That does mean subdirectories, too, though. So Regions\Berlin\region.namedef would have to include
         *                   e.g. foo/bar = Regions\Berlin\foo\bar.namedef to override a plugin including foo/bar = Plugins\foo\bar.namedef.
+        *           Nb. 5) However, files included by a file in one namespace will also use the same namespace. So, for example:
+        *                   * <plugins>/alpha.namedef
+        *                   * including "foo/bar" resolves to <plugins>/foo/bar.namedef
+        *                   * if foo/bar then includes "bang/baz", that will resolve to <plugins>/bang/baz.namedef, not <plugins>/foo/bang/baz.namedef
         *   2. Initialize file-level tracking variables
         *	3. Open file for reading, and fgets() on it in a loop until EOF
         *		i.		Trim whitespace from both sides (including newlines)
@@ -1190,14 +1198,74 @@ protected:
 
         std::unordered_map<std::string, pathlib::path> includeFiles_map;      // maps requested include file name with found include file path
         std::vector<std::string> includeFiles_list;         // just lists requested include file names in load order for enumeration of the map
+        bool skip_auto_includes = false;
 
         // check city first
         pathlib::path cityNames_path = currentRegionDirectory / (currentCityName + DOTNAMES);
         if (pathlib::is_regular_file(cityNames_path))
         {
-            includeFiles_map["??CITY"] = cityNames_path;
-            
+            includeFiles_map[kCitySpecialFileName] = cityNames_path;        // don't need to add city or region name to list since they're unique keys
+            skip_auto_includes = checkIncludesRecursive(currentRegionDirectory, cityNames_path, includeFiles_map, includeFiles_list);
         }
+
+        if (!skip_auto_includes)
+        {
+            // check region next, follow that same pattern^
+            // plugins directory will take a bit more effort
+            pathlib::path regionNames_path = currentRegionDirectory / (std::string("region") + DOTNAMES);
+            if (pathlib::is_regular_file(regionNames_path))
+            {
+                includeFiles_map[kRegionSpecialFileName] = regionNames_path;    // don't need to add city or region name to list since they're unique keys
+                skip_auto_includes = checkIncludesRecursive(currentRegionDirectory, regionNames_path, includeFiles_map, includeFiles_list);
+            }
+        }
+
+        if (!skip_auto_includes)
+        {
+            // remaining files are not allowed to skip remaining auto-includes
+            
+            // okay, plugins directory next
+            // for this one, we should just iterate through the main plugins directory (not subdirectories, so these files can *choose* which files to include)
+            // if the file.path().extension() == DOTNAMES, then do checkIncludesRecursive()
+            // we want to put the found files in a set first, though, so they'll be sorted alphabetically when we check their includes
+            std::set<pathlib::path> found_plugins;
+            for (auto const& f : pathlib::directory_iterator(userPluginDirectory))
+            {
+                if (f.is_regular_file())
+                {
+                    pathlib::path f_path = f.path();
+                    std::string f_ext = f_path.extension().string();
+                    if (f_ext == DOTNAMES && !found_plugins.contains(f_path))
+                    {
+                        // ding ding ding, we got a winner!
+                        found_plugins.insert(f_path);
+                    }
+                }
+            }
+
+            // now they're sorted and we can check against our existing mapping
+            for (auto const& f : found_plugins)
+            {
+                std::string inc_name = f.stem().string();
+                if (!includeFiles_map.contains(inc_name))
+                {
+                    includeFiles_list.push_back(inc_name);
+                    includeFiles_map[inc_name] = f;
+                    checkIncludesRecursive(userPluginDirectory, f, includeFiles_map, includeFiles_list);
+                }
+            }
+
+            // last but not least, the default file and namespace
+            pathlib::path defaultNames_path = userDataDirectory / (std::string("default") + DOTNAMES);
+            if (pathlib::is_regular_file(defaultNames_path))
+            {
+                includeFiles_map[kDefaultSpecialFileName] = defaultNames_path;
+                checkIncludesRecursive(userDataDirectory, defaultNames_path, includeFiles_map, includeFiles_list);
+            }
+        }
+
+        // okay, our list/mapping of includes has been built in the order we want them
+        // now we get to actually build our name match lists
     }
 
     std::vector<std::string> checkIncludes(pathlib::path this_filep)
@@ -1205,10 +1273,11 @@ protected:
         // read a file, but just check for includes for now, we'll parse the namedefs on second pass
     }
 
-    void checkIncludesRecursive(pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map)
+    bool checkIncludesRecursive(pathlib::path this_folder, pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map, std::vector<std::string> &inc_list)
     {
-        // TODO: When you went to bed, you were trying to figure out how to properly implement this recursive include file search
+        bool skip_auto_includes = false;    // for passing up
         std::vector<std::string> this_includes = checkIncludes(this_filep);
+        if (kContains(this_includes, kDisabledIncludes)) skip_auto_includes = true;     // found "<?!", skip remaining auto-include files in calling function
         if (this_includes.size())
         {
             // resolve included file names to canonical paths
@@ -1216,20 +1285,60 @@ protected:
             {
                 if (!inc_map.contains(inc))
                 {
-                    pathlib::path res_inc = resolveInclude(currentRegionDirectory, inc);
-                    inc_map[inc] = res_inc;
+                    pathlib::path res_inc = resolveInclude(this_folder, inc);
+                    if (!res_inc.empty())
+                    {
+                        inc_map[inc] = res_inc;
+                        inc_list.push_back(inc);
 
-                    // aaaaand recurse! Shouldn't be any risk of an infinite loop since we're always checking if we've already added a particular include
-                    checkIncludesRecursive(res_inc, inc_map);
+                        // aaaaand recurse! Shouldn't be any risk of an infinite loop since we're always checking if we've already added a particular include
+                        if (checkIncludesRecursive(this_folder, res_inc, inc_map, inc_list)) skip_auto_includes = true;
+                    }
+                    // if it doesn't resolve, no biggie, this is just a vidya game, we'll skip it silently
+                    // until I figure out that I need to debug why something isn't working, lol
                 }
             }
         }
+        return skip_auto_includes;
     }
 
     pathlib::path resolveInclude(pathlib::path folder, std::string include_name)
     {
         // get canonical path for an include name in the given namespace/folder
-        
+        trim(include_name);                 // trim whitespace
+        iltrim(include_name, "./\\");       // trim dots and slashes from the beginning -- should prevent parent directory includes
+        irtrim(include_name, "/\\");        // just trim trailing slashes -- they're unnecessary and will conflict with the file extension
+        trim(include_name);                 // trim whitespace again after trimming the others
+        include_name += DOTNAMES;
+
+        pathlib::path this_inc = pathlib::canonical(folder / include_name);
+        if (pathlib::is_regular_file(this_inc))
+        {
+            // this should do
+            return this_inc;
+        }
+        else
+        {
+            // nothing in current folder, let's check another...
+            if (folder == currentRegionDirectory)
+            {
+                // check plugins next
+                this_inc = pathlib::canonical(userPluginDirectory / include_name);
+                if (pathlib::is_regular_file(this_inc))
+                {
+                    return this_inc;
+                }
+            }
+            // if we're not in the region directory, we've already checked the plugin directory because that'd be next, so now the main one
+            this_inc = pathlib::canonical(userDataDirectory / include_name);
+            if (pathlib::is_regular_file(this_inc))
+            {
+                return this_inc;
+            }
+        }
+
+        // no match
+        return "";
     }
 
     std::vector<kcLotNamerMatch> parseOne(pathlib::path this_filep)
