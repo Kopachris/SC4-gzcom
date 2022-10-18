@@ -8,7 +8,7 @@
         * Names cannot start with: ~, ~^, +, -, <, >, ;, or *
         * Names cannot contain: ;
         * 
-        * The file is split by line, but afterwards whitespace is stripped before identification and processing.
+        * The file is split by line with two newlines breaking up sections, but afterwards whitespace is stripped before identification and processing.
         * 
         * Buildings which do not have any occupant groups listed in their exemplar that are defined in this file will
         * be ignored/excluded by default, unless they match a specific name. Chances of choosing a particular name can
@@ -18,8 +18,8 @@
         * ~^<regex>			following names apply to occupant names matching the given regex, including the initial ^ (BOL anchor), requires an occupant group
         * ~%<regex>         following names apply to occupant names partially matching the given regex, no default BOL anchor, also requires an occupant group
         * ~<string>			following names apply to a specific building occupant name, overriding occupant groups (basically if no int or regex)
-        * +<uint32>         following names apply to this occupant group in addition to previously set occupant group(s) (i.e. must have both/all declared in this section)
-        * +<string>			following names apply to a specific occupant name, added to currently set occupant groups
+        //* +<uint32>         following names apply to this occupant group in addition to previously set occupant group(s) (i.e. must have both/all declared in this section)
+        //* +<string>			following names apply to a specific occupant name, added to currently set occupant groups
         * ++<string>        specified string should be added to previous name with a space between (mainly for use with results of URL lines)
         * -<uint32>			following building occupant names in this occupant group should be excluded from randomization
         * **				when used the within a -<uint32> header, indicates exclude ALL occupants with this group, even if
@@ -27,11 +27,11 @@
         * *<uint16_t>       add preceding name to the list the given number of times, for controlling probabilities, works with URL inputs as well
         * >https://url.com  get a URL and parse its contents as JSON. Will use the "name" attribute of the returned JSON by default, see "URL inputs" below
         * ;<string>			line comment. Can also go after data on a line, the rest of the line will be ignored.
-        * **PRIORITIES**	(literal, not case-sensitive) following <uint32> lines define occupant group priorities 
-        *					if a building occupant is in multiple defined groups. Specific original building occupant names
-        *					that are defined with '~' always take priority over any occupant group definitions.
+        //* **PRIORITIES**	(literal, not case-sensitive) following <uint32> lines define occupant group priorities 
+        //*					if a building occupant is in multiple defined groups. Specific original building occupant names
+        //*					that are defined with '~' always take priority over any occupant group definitions.
         * <example.txt		include another file at this point (note, see "**PRIORITIES**" below)
-        * <!                do not include default files. Only valid within region folders because it's mainly only saying to skip:
+        * <?!                do not include default files. Only valid within region folders because it's mainly only saying to skip:
         *                       the region file auto-include (if used in a city names file)
         *                       the plugins directory auto-includes
         *                       the main auto-include at the Documents\SimCity 4\ directory level, which by default includes another file containing SC4 default names

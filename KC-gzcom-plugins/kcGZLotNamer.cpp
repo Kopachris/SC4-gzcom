@@ -5,34 +5,21 @@
 #define RAPIDJSON_HAS_STDSTRING true
 #endif
 
-#include "include/cIGZApp.h"
-#include "include/cIGZCheatCodeManager.h"
-#include "include/cIGZFrameWork.h"
-#include "include/cRZCOMDllDirector.h"
-#include "include/cIGZMessage2.h"
-#include "include/cIGZMessageServer2.h"
-#include "include/cIGZMessage2Standard.h"
-//#include "include/cISC4AdvisorSystem.h"
-#include "include/cISC4App.h"
-//#include "include/cISC4BuildingDevelopmentSimulator.h"
-#include "include/cISC4City.h"
-#include "include/cISC4Region.h"
-#include "include/cISC4Lot.h"
-//#include "include/cISC4LotConfiguration.h"
-//#include "include/cISC4LotConfigurationManager.h"
-//#include "include/cISC4LotDeveloper.h"
-//#include "include/cISC4LotManager.h"
-#include "include/cISC4Occupant.h"
-#include "include/cISC4OccupantManager.h"
-#include "include/cISC4BuildingOccupant.h"
-//#include "include/cISC4RegionalCity.h"
-#include "include/cISCPropertyHolder.h"
-#include "include/cRZMessage2COMDirector.h"
-#include "include/cRZMessage2Standard.h"
-#include "include/cRZBaseString.h"
-#include "include/GZServPtrs.h"
-//#include "include/SC4Rect.h"
-//#include <list>
+/*************************************
+* TO DO LIST: (what's left?)
+* --------------------------
+* 
+* Actually implement RandomizeOne()
+* Then implement RandomizeAll()
+* Add debug statements
+* Review code again
+* Compile, fix stuff that's keeping it from compiling
+* Test, fix stuff that goes wrong in testing
+* Clean up code formatting (rename a lot of this shit so it makes more sense) and make a new VS solution for this, new GitHub repo
+* Maybe move some utility stuff into their own files, or combine with the strtrim thing and throw those in their own repo too
+**************************************/
+
+// standard library includes
 #include <set>
 #include <string>
 #include <locale>
@@ -41,15 +28,46 @@
 #include <fstream>
 #include <filesystem>
 #include <format>
+#include <functional>
 #include <regex>
 #include <algorithm>
 #include <random>
 #include <chrono>
+
+// GZCOM framework includes
+#include "include/cIGZApp.h"
+#include "include/cIGZCheatCodeManager.h"
+#include "include/cIGZFrameWork.h"
+#include "include/cRZCOMDllDirector.h"
+#include "include/cIGZMessage2.h"
+#include "include/cIGZMessageServer2.h"
+#include "include/cIGZMessage2Standard.h"
+#include "include/cISC4App.h"
+#include "include/cISC4City.h"
+#include "include/cISC4Region.h"
+#include "include/cISC4Lot.h"
+#include "include/cISC4Occupant.h"
+#include "include/cISC4OccupantManager.h"
+#include "include/cISC4BuildingOccupant.h"
+#include "include/cISCPropertyHolder.h"
+#include "include/cRZMessage2COMDirector.h"
+#include "include/cRZMessage2Standard.h"
+#include "include/cRZBaseString.h"
+#include "include/GZServPtrs.h"
+
+// 3rd-party library includes
 #include <cpr/cpr.h>
 #include <rapidjson/document.h>
 #include <rapidjson/pointer.h>
+
+// personal and project includes
 #include "strtrim.h"
 
+//==============================
+//*********END INCLUDES*********
+//==============================
+
+// I'll probably get rid of this
 #ifndef SIG_KOPA
 #define SIG_KOPA 0x4b4f5041
 // ^ literally "KOPA" if little-endian, "APOK" if big-endian, I guess
@@ -64,6 +82,9 @@
 #define DBGMSG(x) std::cerr << x << std::endl
 #define DBGINPUT(x) std::cin >> x
 #endif
+
+// constants
+static const uint32_t kKCLotNamerPluginCOMDirectorID = 0x44d0baa0;
 
 static const uint32_t kGZIID_cIGZCheatCodeManager = 0xa1085722;
 static const uint32_t kGZIID_cISC4App = 0x26ce01c0;
@@ -80,23 +101,18 @@ static const uint32_t kGZMSG_OccupantRemoved = 0x99ef1143;
 static const uint32_t kSC4MessageInsertBuildingOccupant = 0x8B8B2CED;
 
 static const uint32_t kSCPROP_ExemplarID = 0x21;
-static const uint32_t kSCPROP_CityExclusionGroup = 0xea2e078b;
 static const uint32_t kOccupantType_Building = 0x278128a0;
 static const uint32_t kOccupantType_Default = 0x74758925;
 static const uint32_t kSC4CLSID_cSC4BuildingOccupant = 0xA9BD882D;
 
-static const uint32_t kKCLotNamerPluginCOMDirectorID = 0x44d0baa0;
-
 static const uint32_t kKCCheatRandomizeNames = 0x44ccbaa0;
 static const char* kszKCCheatRandomizeNames = "NameGame";
 
-static const uint32_t MATCHTGT_OCCGROUP = 1;        // MATCHTGT = the target mapping to add this definition to (the important one)
-static const uint32_t MATCHTGT_NAME = 1 << 1;
-static const uint32_t MATCHTYPE_INT = 1 << 15;      // MATCHTYPE = the main type of match being made (not used)
-static const uint32_t MATCHTYPE_STRING = 1 << 16;
-static const uint32_t MATCHTYPE_REGEX = 1 << 17;
-static const uint32_t MATCHMOD_EXCEPTIONS = 1 << 30;    // MATCHMOD = any modifier signifying flags (not used)
-static const uint32_t MATCHMOD_PARTIAL = 1 << 31;   
+static const uint16_t MATCHTYPE_INT = 1;      // MATCHTYPE = the main type of match being made
+static const uint16_t MATCHTYPE_STRING = 1 << 1;
+static const uint16_t MATCHTYPE_REGEX = 1 << 2;
+static const uint16_t MATCHMOD_EXCEPTIONS = 1 << 15;    // MATCHMOD = any modifier signifying flags
+static const uint16_t MATCHMOD_PARTIAL = 1 << 16;   
 
 static const char* kCitySpecialFileName = "??CITY";     // allows plugin-included files with same name as the city names def file
 static const char* kRegionSpecialFileName = "??REGION";
@@ -108,11 +124,13 @@ static const char* kDisabledIncludes = "??NOINCLUDES";      // auto-inclusions h
 static const char* dbgOccupantLog = "C:\\occupants.log";
 #endif
 
-static const char* namesListFilename = "kcGZLotNamer_names.txt";
 static const char* DOTNAMES = ".namedef";       // file extension for our name definition files--this is easier than the prefix idea I think
+
+// a couple utility things
 constexpr auto hexfmt = "{:#010x}";
 #define HEXFMT(x) std::format("{:#010x}", x)
 
+// Namespaces
 namespace json = rapidjson;
 namespace requests = cpr;           // lul, it's modeled after Python's requests, may as well call it that
 namespace pathlib = std::filesystem;
@@ -123,18 +141,68 @@ using td = std::chrono::duration<double, std::ratio<1>>;        // timedelta in 
 using namespace std::literals;      // for duration literals e.g. 60s
 using namespace strtrim;            // for string trimming helpers
 
-// easier generic contains on a vector
+// easier generic contains on a vector -- DON'T PASS sensitive=false UNLESS YOU CAN CALL std::toupper() ON IT
+// the == operator on kcLotNamerMatch classes checks against target, flags, key, and priority modifier, but
+// not the lower half of the priority or the actual list of names
+// the point being if we've already got a match def with all those parameters, we don't need to make another
+// and can just add the new list of names to the existing match def
 template<class T, class V = std::vector<T>>
-bool kContains(V& haystack, T& needle, bool sensitive = true)
+bool kContains(V& h, T& n, bool sensitive = true)
 {
     if (sensitive)
     {
-        return std::any_of(haystack.begin(), haystack.end(), [needle](T& x) { return x == needle; });
+        return std::any_of(h.begin(), h.end(), [&](T& x) { return x == n; });
     }
     else
     {
         l = std::locale();
-        return std::any_of(haystack.begin(), haystack.end(), [needle](T& x) {return std::toupper(x, l) == std::toupper(needle, l); });
+        return std::any_of(h.begin(), h.end(), [&](T& x) { return std::toupper(x, l) == std::toupper(n, l); });
+    }
+}
+
+// easier generic find index on a vector -- DON'T PASS sensitive=false UNLESS YOU CAN CALL std::toupper() ON IT
+template<class T, class V = std::vector<T>>
+int kFind(V& h, T& n, bool sensitive = true)
+{
+    if (sensitive)
+    {
+        std::random_access_iterator res_it = std::find(h.begin(), h.end(), n);
+        if (res_it != h.end())
+        {
+            return res_it - h.begin();
+        }
+        else
+        {
+            return -1;
+        }
+    }
+    else
+    {
+        l = std::locale();
+        std::random_access_iterator res_it = std::find(h.begin(), h.end(), [&](T& x) { return std::toupper(x, l) == std::toupper(n, l); });
+        if (res_it != h.end())
+        {
+            return res_it - h.begin();
+        }
+        else
+        {
+            return -1;
+        }
+    }
+}
+
+// easier generic find and get pointer to existing element on a vector -- DON'T PASS sensitive=false UNLESS YOU CAN CALL std::toupper() ON IT
+template<class T, class V = std::vector<T>>
+T* kGetItem(V& h, T& n, bool sensitive = true)
+{
+    res_idx = kFind(h, n, sensitive);
+    if (res_idx > -1)
+    {
+        return &h[res_idx];
+    }
+    else
+    {
+        return nullptr;
     }
 }
 
@@ -142,7 +210,7 @@ bool kContains(V& haystack, T& needle, bool sensitive = true)
 template<class T>
 void iextend(std::vector<T>& first, std::vector<T>& other)
 {
-    std::for_each(other.begin(), other.end(), [first](T o) { first.push_back(o); });
+    for (T o : other) first.push_back(o);
 }
 
 template<class T>
@@ -150,6 +218,21 @@ std::vector<T> extend(std::vector<T>& first, std::vector<T>& other)
 {
     std::vector<T> new_first = first;
     iextend(new_first, other);
+    return new_first;
+}
+
+bool get_uint(std::string s, uint32_t* i)
+{
+    // try to get an unsigned integer from s, putting it in i
+    // returns true if successful, false if no integer found
+    // just a try { } wrapper around stoul() with any base set, but more convenient to write since I'll be using it a lot
+    try
+    {
+        *i = std::stoul(s, nullptr, 0);
+        return true;
+    }
+    catch (std::invalid_argument&) { return false; }
+    catch (std::out_of_range&) { return false; }
 }
 
 //using std::vector::contains;
@@ -375,7 +458,59 @@ public:
 
         url = requests::Url(mr[0]);
         json_pointer = json::Pointer(mr[1]);
+    }
 
+    kcURLNameChoice(std::string iName, kcNameChoice* pref)
+    {
+        data = "";
+        init_data = iName;
+        name_resolved = false;
+
+        // should get the URL, the JSON, and the optional regex or start and length specifiers, as well as optional comments
+        std::regex namedef_parser(R"(^(\S+)\s+(#?\/\S+)\s*(\^.+?|\-?\d+(\s+|,)\d+)?\s*(;.*)?$)", std::regex::optimize);
+        std::smatch mr;
+
+        if (!iName.starts_with("http://") && !iName.starts_with("https://"))
+        {
+            // malformed URL, we'll just leave it empty
+            DBGMSG(std::format("Malformed URL: {}", iName).c_str());
+            name_resolved = true;
+            return;
+        }
+
+        // split iName up to get the URL, json pointer, and the optional regex or start/length
+        std::regex_match(iName, mr, namedef_parser);
+
+        if (mr.size() < 2)
+        {
+            // didn't get at least a URL and JSON pointer
+            DBGMSG(std::format("Malformed URL line, less than 2 matches: {}", iName).c_str());
+            name_resolved = true;
+            return;
+        }
+        else if (mr.size() > 2)
+        {
+            std::string locator = mr[2];
+            char check_char = locator.front();
+            if (check_char == '^')
+            {
+                result_regex = std::regex(locator, std::regex::optimize);
+                use_regex = true;
+            }
+            else if (check_char == '-' || (0x30 <= check_char < 0x40))      // hopefully looking at a start_idx and length_spec
+            {
+
+                if (locator.contains(',')) num_fmt = "%d,%d";
+                else num_fmt = "%d %d";
+
+                std::sscanf(num_fmt, locator.c_str(), start_idx, length_spec);
+            }
+            // anything else is a comment or space, ignore it
+        }
+
+        url = requests::Url(mr[0]);
+        json_pointer = json::Pointer(mr[1]);
+        pref->suffix = this;
     }
 
     std::string getName()
@@ -442,7 +577,7 @@ public:
                 this_length_spec = length_spec * -1;
                 if (start_idx < 0)      // negative, index from original end, now beginning
                 {
-                    int this_start_idx = start_idx * -1;
+                    this_start_idx = start_idx * -1;
                     if (this_start_idx >= result_len) this_start_idx = result_len - 1;         // Negative index that would've been clamped to beginning is now actually past the end of the string
                     DBGMSG(std::format("Substring start (reading backwards, originally negative index) would be past end of string: \"{}\" [{}], length {}", final_result, start_idx, final_result.length()).c_str());
                     data = "";
@@ -457,16 +592,16 @@ public:
                 else
                 {
                     // was indexed from beginning, now indexed from end because the string is reversed
-                    int this_start_idx = result_len - start_idx;
+                    this_start_idx = result_len - start_idx;
                     if (this_start_idx < 0) this_start_idx = 0;         // clamp to beginning (former end)
                 }
             }
-            else
+            else if (length_spec > 0)
             {
                 this_length_spec = length_spec;
                 if (start_idx < 0)      // negative, index from end
                 {
-                    int this_start_idx = result_len - start_idx;
+                    this_start_idx = result_len - start_idx;
                     if (this_start_idx < 0) this_start_idx = 0;         // index-from-end puts us back past the beginning, clamp to beginning
                 }
                 else if (start_idx >= result_len)
@@ -475,7 +610,25 @@ public:
                     data = "";
                     return "";
                 }
-                else int this_start_idx = start_idx;
+                else this_start_idx = start_idx;
+            }
+            else
+            {
+                // length_spec is 0, return entire string from start idx
+                // still gotta handle negative start index
+                this_length_spec = result_len;
+                if (start_idx < 0)      // negative, index from end
+                {
+                    this_start_idx = result_len - start_idx;
+                    if (this_start_idx < 0) this_start_idx = 0;         // index-from-end puts us back past the beginning, clamp to beginning
+                }
+                else if (start_idx >= result_len)
+                {
+                    DBGMSG(std::format("Substring start would be past end of string: \"{}\" [{}], length {}", final_result, start_idx, final_result.length()).c_str());
+                    data = "";
+                    return "";
+                }
+                else this_start_idx = start_idx;
             }
 
             std::string ret = final_result.substr(this_start_idx, this_length_spec);
@@ -505,7 +658,10 @@ class kcLotNamerMatch
 {
 public:
 
-    static const uint32_t match_flags = 0x00;
+    enum MatchTarget { occGroup, occName };
+
+    static const uint16_t match_flags = 0x00;
+    static const MatchTarget match_target;
 
     kcLotNamerMatch() { };
 
@@ -518,6 +674,14 @@ public:
     {
         names = inames;             // initial names list
         priority = ipriority;       // initial priority
+    }
+
+    static inline bool operator==(kcLotNamerMatch& lhs, kcLotNamerMatch& rhs)
+    {
+        return (lhs.match_flags == rhs.match_flags) && 
+            (lhs.match_target == rhs.match_target) && 
+            (lhs.priorityMod == rhs.priorityMod) &&
+            (lhs.getKey() == rhs.getKey());
     }
 
     // return a random name from the list as a cRZ string
@@ -534,12 +698,19 @@ public:
 
     void addOne(kcNameChoice &nc)
     {
+        // this one may be overridden to handle any validation needed
         names.push_back(nc);
     }
 
     void addMany(std::vector<kcNameChoice>& ncs)
     {
-        std::for_each(ncs.begin(), ncs.end(), [this](kcNameChoice& nc) { addOne(nc); });
+        // this one should be fine if addOne is implemented right
+        for (kcNameChoice& nc : ncs) addOne(nc);
+    }
+
+    void addMany(kcLotNamerMatch& other)
+    {
+        for (kcNameChoice& nc : other.names) addOne(nc);
     }
 
     // return true if this should take priority over other
@@ -563,12 +734,14 @@ public:
         return lhs->cmpPriority(rhs);
     }
 
-    virtual bool checkMatch(cISC4Occupant* thisOccupant)
+    bool checkMatch(cISC4Occupant* thisOccupant)
     {
         // Needs to be implemented by subclasses
         // Actually does the job of checking an SC4 occupant against the match definition
         // Return true if matching
     }
+
+    std::set<uint32_t> getKey() { }
 
 protected:
     const static uint16_t priorityMod = 0;      // meant to give certain classes of match absolute priority over others (e.g. due to specificity)
@@ -582,29 +755,53 @@ class kcOccGroupLotNamerMatch : public kcLotNamerMatch
 {
 public:
 
-    static const uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTYPE_INT;
+    static const uint16_t match_flags = MATCHTYPE_INT;
+    static const MatchTarget match_target = occGroup;
 
     kcOccGroupLotNamerMatch(uint32_t iOccupantGroup, std::vector<kcNameChoice> inames)
     {
         names = inames;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
     }
 
     kcOccGroupLotNamerMatch(uint16_t ipriority, uint32_t iOccupantGroup, std::vector<kcNameChoice> inames)
     {
         names = inames;
         priority = ipriority;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup } ;
+    }
+
+    kcOccGroupLotNamerMatch(std::set<uint32_t> iOccupantGroups, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        dwOccupantGroups = iOccupantGroups;
+
+    }
+
+    kcOccGroupLotNamerMatch(uint16_t ipriority, std::set<uint32_t> iOccupantGroups, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        priority = ipriority;
+        dwOccupantGroups = iOccupantGroups;
     }
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
-        return thisOccupant->IsOccupantGroup(dwOccupantGroup);
+        for (auto& og : dwOccupantGroups)
+        {
+            if (!thisOccupant->IsOccupantGroup(og)) return false;
+        }
+        return true;
+    }
+
+    std::set<uint32_t> getKey()
+    {
+        return dwOccupantGroups;
     }
 
 protected:
     const static uint16_t priorityMod = 1;
-    uint32_t dwOccupantGroup;
+    std::set<uint32_t> dwOccupantGroups;
 };
 
 // Match based on occupant name:
@@ -613,7 +810,8 @@ class kcStringLotNamerMatch : public kcLotNamerMatch
 {
 public:
 
-    static const uint32_t match_flags = MATCHTGT_NAME | MATCHTYPE_STRING;
+    static const uint16_t match_flags = MATCHTYPE_STRING;
+    static const MatchTarget match_target = occName;
 
     kcStringLotNamerMatch(std::string iMatchName, std::vector<kcNameChoice> inames)
     {
@@ -644,6 +842,11 @@ public:
         }
     }
 
+    std::string getKey()
+    {
+        return szMatchName;
+    }
+
 protected:
     const static uint16_t priorityMod = 8;
     std::string szMatchName;
@@ -658,12 +861,13 @@ class kcPartialOccGroupRegexMatch : public kcLotNamerMatch
     // this is a version of the occupant group + regex match that doesn't require a full match (usually requiring at least a BOL anchor)
 public:
 
-    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTYPE_REGEX | MATCHMOD_PARTIAL;
+    static const uint16_t match_flags = MATCHTYPE_REGEX | MATCHMOD_PARTIAL;
+    static const MatchTarget match_target = occGroup;
 
     kcPartialOccGroupRegexMatch(uint32_t iOccupantGroup, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
     {
         names = inames;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
         rxMatchName = iMatchRegex;
     }
 
@@ -671,15 +875,31 @@ public:
     {
         names = inames;
         priority = ipriority;
-        dwOccupantGroup = iOccupantGroup;
-        rxMatchName = iMatchRegex;      // might want to do iMatchRegex.erase(iMatchRegex.begin()) to get rid of initial ^ if using the same section header indicator
-                                        // should probably just use a different indicator though, so a ^ can be seen as deliberate and preserved
-                                        // how about %?
+        dwOccupantGroups = { iOccupantGroup };
+        rxMatchName = iMatchRegex;
+    }
+
+    kcPartialOccGroupRegexMatch(std::set<uint32_t> iOccupantGroups, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        dwOccupantGroups = iOccupantGroups;
+        rxMatchName = iMatchRegex;
+    }
+
+    kcPartialOccGroupRegexMatch(uint16_t ipriority, std::set<uint32_t> iOccupantGroups, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        priority = ipriority;
+        dwOccupantGroups = iOccupantGroups;
+        rxMatchName = iMatchRegex;
     }
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
-        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+        for (auto& og : dwOccupantGroups)
+        {
+            if (!thisOccupant->IsOccupantGroup(og)) return false;
+        }
 
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
@@ -695,10 +915,15 @@ public:
         }
     }
 
+    std::set<uint32_t> getKey()
+    {
+        return dwOccupantGroups;
+    }
+
 protected:
     const static uint16_t priorityMod = 4;
     std::regex rxMatchName;
-    uint32_t dwOccupantGroup;
+    std::set<uint32_t> dwOccupantGroups;
 };
 
 // Match based on occupant group ID && a complete regex match
@@ -709,12 +934,13 @@ class kcOccGroupRegexMatch : public kcLotNamerMatch
 {
 public:
 
-    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTGT_NAME | MATCHTYPE_REGEX;
+    static const uint16_t match_flags = MATCHTYPE_REGEX;
+    static const MatchTarget match_target = occGroup;
 
     kcOccGroupRegexMatch(uint32_t iOccupantGroup, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
     {
         names = inames;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
         rxMatchName = iMatchRegex;
     }
 
@@ -722,13 +948,32 @@ public:
     {
         names = inames;
         priority = ipriority;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
+        rxMatchName = iMatchRegex;
+    }
+
+    kcOccGroupRegexMatch(std::set<uint32_t> iOccupantGroups, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        dwOccupantGroups = iOccupantGroups;
+        rxMatchName = iMatchRegex;
+    }
+
+    kcOccGroupRegexMatch(uint16_t ipriority, std::set<uint32_t> iOccupantGroups, std::regex iMatchRegex, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        priority = ipriority;
+        dwOccupantGroups = iOccupantGroups;
         rxMatchName = iMatchRegex;
     }
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
-        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+        for (auto& og : dwOccupantGroups)
+        {
+            if (!thisOccupant->IsOccupantGroup(og)) return false;
+        }
+        return true;
 
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
@@ -744,10 +989,15 @@ public:
         }
     }
 
+    std::set<uint32_t> getKey()
+    {
+        return dwOccupantGroups;
+    }
+
 protected:
     const static uint16_t priorityMod = 16;     // leaves room for more classes between direct string and this combined match definition
     std::regex rxMatchName;
-    uint32_t dwOccupantGroup;
+    std::set<uint32_t> dwOccupantGroups;
 };
 
 // Match based on occupant group ID && exact, complete string match
@@ -757,12 +1007,13 @@ class kcOccGroupStringMatch : public kcLotNamerMatch
 {
 public:
 
-    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHTGT_NAME | MATCHTYPE_STRING;
+    static const uint16_t match_flags = MATCHTYPE_STRING;
+    static const MatchTarget match_target = occGroup;
 
     kcOccGroupStringMatch(uint32_t iOccupantGroup, std::string iMatchString, std::vector<kcNameChoice> inames)
     {
         names = inames;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
         szMatchName = iMatchString;
     }
 
@@ -770,13 +1021,32 @@ public:
     {
         names = inames;
         priority = ipriority;
-        dwOccupantGroup = iOccupantGroup;
+        dwOccupantGroups = { iOccupantGroup };
+        szMatchName = iMatchString;
+    }
+
+    kcOccGroupStringMatch(std::set<uint32_t> iOccupantGroups, std::string iMatchString, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        dwOccupantGroups = iOccupantGroups;
+        szMatchName = iMatchString;
+    }
+
+    kcOccGroupStringMatch(uint16_t ipriority, std::set<uint32_t> iOccupantGroups, std::string iMatchString, std::vector<kcNameChoice> inames)
+    {
+        names = inames;
+        priority = ipriority;
+        dwOccupantGroups = iOccupantGroups;
         szMatchName = iMatchString;
     }
 
     bool checkMatch(cISC4Occupant* thisOccupant)
     {
-        if (!thisOccupant->IsOccupantGroup(dwOccupantGroup)) return false;
+        for (auto& og : dwOccupantGroups)
+        {
+            if (!thisOccupant->IsOccupantGroup(og)) return false;
+        }
+        return true;
 
         cISC4BuildingOccupant* bOccupant;
         if (thisOccupant->QueryInterface(kGZIID_cISC4BuildingOccupant, (void**)&bOccupant))
@@ -794,10 +1064,15 @@ public:
         }
     }
 
+    std::set<uint32_t> getKey()
+    {
+        return dwOccupantGroups;
+    }
+
 protected:
     const static uint16_t priorityMod = 17;
     std::string szMatchName;
-    uint32_t dwOccupantGroup;
+    std::set<uint32_t> dwOccupantGroups;
 };
 
 // This class, instead of using the names variable to return a name, uses it in checkMatch()
@@ -806,7 +1081,8 @@ class kcLotNamerExclusions : public kcLotNamerMatch
 {
 public:
     std::vector<std::string> names;
-    const static uint32_t match_flags = MATCHTGT_OCCGROUP | MATCHMOD_EXCEPTIONS;
+    static const uint16_t match_flags = MATCHMOD_EXCEPTIONS;
+    static const MatchTarget match_target = occGroup;
 
     kcLotNamerExclusions(uint32_t iOccupantGroup, std::vector<std::string> inames)
     {
@@ -845,7 +1121,15 @@ public:
     {
         if (match_all) return;
 
-        iextend(names, ncs);
+        if (kContains(ncs, "**"))
+        {
+            names = std::vector{ std::string("**") };
+            match_all = true;
+        }
+        else
+        {
+            iextend(names, ncs);
+        }
     }
 
     bool checkMatch(cISC4Occupant* thisOccupant)
@@ -871,6 +1155,11 @@ public:
 
         return kContains(names, this_name, false);
 
+    }
+
+    uint32_t getKey()
+    {
+        return dwOccupantGroup;
     }
 
 protected:
@@ -1192,10 +1481,6 @@ protected:
         *		iv.		Use section context and key to add lines to appropriate list if no special char match
         */
 
-        std::map<int, kcLotNamerExclusions> exclusions_map;
-        std::map<std::string, std::vector<kcLotNamerMatch>> namesByName_map;
-        std::map<int, std::vector<kcLotNamerMatch>> namesByGroup_map;
-
         std::unordered_map<std::string, pathlib::path> includeFiles_map;      // maps requested include file name with found include file path
         std::vector<std::string> includeFiles_list;         // just lists requested include file names in load order for enumeration of the map
         bool skip_auto_includes = false;
@@ -1204,7 +1489,8 @@ protected:
         pathlib::path cityNames_path = currentRegionDirectory / (currentCityName + DOTNAMES);
         if (pathlib::is_regular_file(cityNames_path))
         {
-            includeFiles_map[kCitySpecialFileName] = cityNames_path;        // don't need to add city or region name to list since they're unique keys
+            includeFiles_map[kCitySpecialFileName] = cityNames_path;
+            includeFiles_list.push_back(kCitySpecialFileName);
             skip_auto_includes = checkIncludesRecursive(currentRegionDirectory, cityNames_path, includeFiles_map, includeFiles_list);
         }
 
@@ -1215,7 +1501,8 @@ protected:
             pathlib::path regionNames_path = currentRegionDirectory / (std::string("region") + DOTNAMES);
             if (pathlib::is_regular_file(regionNames_path))
             {
-                includeFiles_map[kRegionSpecialFileName] = regionNames_path;    // don't need to add city or region name to list since they're unique keys
+                includeFiles_map[kRegionSpecialFileName] = regionNames_path;
+                includeFiles_list.push_back(kRegionSpecialFileName);
                 skip_auto_includes = checkIncludesRecursive(currentRegionDirectory, regionNames_path, includeFiles_map, includeFiles_list);
             }
         }
@@ -1246,7 +1533,7 @@ protected:
             // now they're sorted and we can check against our existing mapping
             for (auto const& f : found_plugins)
             {
-                std::string inc_name = f.stem().string();
+                std::string inc_name = f.string().substr(userPluginDirectory.string().length());
                 if (!includeFiles_map.contains(inc_name))
                 {
                     includeFiles_list.push_back(inc_name);
@@ -1260,17 +1547,278 @@ protected:
             if (pathlib::is_regular_file(defaultNames_path))
             {
                 includeFiles_map[kDefaultSpecialFileName] = defaultNames_path;
+                includeFiles_list.push_back(kDefaultSpecialFileName);
                 checkIncludesRecursive(userDataDirectory, defaultNames_path, includeFiles_map, includeFiles_list);
             }
         }
 
         // okay, our list/mapping of includes has been built in the order we want them
         // now we get to actually build our name match lists
+
+        std::map<int, kcLotNamerExclusions> exclusions_map;
+        std::map<std::string, kcLotNamerMatch> namesByName_map;
+        std::map<std::set<uint32_t>, std::vector<kcLotNamerMatch>> namesByGroup_map;
+
+        uint16_t cur_priority = 1;
+        unsigned int names_added = 0;
+        using mTgt = kcLotNamerMatch::MatchTarget;
+        for (std::string inc_f : includeFiles_list)
+        {
+            pathlib::path this_inc = includeFiles_map[inc_f];       // get the canonical path of this include name
+            std::vector<kcLotNamerMatch> these_defs = parseNamefile(this_inc, cur_priority);
+            for (auto& this_md : these_defs)
+            {
+                if (this_md.match_flags & MATCHMOD_EXCEPTIONS)
+                {
+                    // exceptions definition
+                    // check for existing def with same occ group
+                    // add this one's names to the other if existing, add this one to the map if not
+                    kcLotNamerExclusions* this_md = dynamic_cast<kcLotNamerExclusions*>(this_md);
+                    if (!this_md) continue;     // something went wrong
+
+                    int this_og = this_md->getKey();
+                    if (exclusions_map.contains(this_og))
+                    {
+                        exclusions_map[this_og].addMany(this_md->names);
+                    }
+                    exclusions_map[this_og] = *this_md;
+                }
+                else if (this_md.match_target == mTgt::occName)
+                {
+                    // goes to namesByName
+                    kcStringLotNamerMatch* this_md = dynamic_cast<kcStringLotNamerMatch*>(this_md);
+                    if (!this_md) continue;
+
+                    std::string this_name = this_md->getKey();
+                    if (namesByName_map.contains(this_name))
+                    {
+                        namesByName_map[this_name].addMany(*this_md);
+                    }
+                }
+                else if (this_md.match_target == mTgt::occGroup)
+                {
+                    // shouldn't ever be anything else, right?
+                    // goes to namesByGroup
+                    std::set<uint32_t> these_ogs = this_md.getKey();
+                    if (namesByGroup_map.contains(these_ogs))
+                    {
+                        auto& this_group = namesByGroup_map[these_ogs];
+                        if (kContains(this_group, this_md))
+                        {
+                            kGetItem(this_group, this_md)->addMany(this_md);
+                        }
+                        else
+                        {
+                            this_group.push_back(this_md);
+                        }
+                    }
+                    else
+                    {
+                        namesByGroup_map[these_ogs] = std::vector{ this_md };
+                    }
+                }
+            }
+        }
+    }
+
+    std::vector<kcLotNamerMatch> parseNamefile(pathlib::path this_filep, uint16_t &priority)
+    {
+        // read a file and a return a vector of name match definitions to be sorted by the caller based on their flags
+        // priority gives the starting priority of the built name matches
+        // priority should increment with each match def
+        // if we end up making more than 65535 match definitions someone's got a problem and it's not me and my code
+        if (!pathlib::is_regular_file(this_filep)) return;
+
+        std::vector<kcLotNamerMatch> these_matchdefs;
+        std::ifstream this_file(this_filep);
+        for (std::string this_hdr; std::getline(this_file, this_hdr); )
+        {
+            // strip comments first
+            if (this_hdr.contains(';'))
+            {
+                this_hdr.erase(this_hdr.find(';'));
+            }
+
+            itrim(this_hdr);    // then whitespace
+
+            if (this_hdr.empty()) continue;     // it was all comment and/or whitespace, skip to next line
+
+            // check header type
+
+            char x = this_hdr.front();
+            if (x == '~')
+            {
+                // check if integer, else string
+                // begin parsing section lines, keep an eye out for extra headers
+                // don't build LotNamerMatch object yet
+                uint32_t this_og;
+                std::set<uint32_t> these_ogs;
+                std::string match_name;
+                bool string_only = false;
+                bool use_regex = false;
+                bool partial_regex = false;
+                bool most_specific = false;     // we've already got an occupant group and a regex or a string, treat any other non-int header definitions to the end of this section as name choices
+                std::vector<kcNameChoice> these_names;
+
+                if (!get_uint(this_hdr.substr(1), &this_og)) 
+                {
+                    match_name = this_hdr.substr(1);
+                    string_only = true;
+                    most_specific = true;
+                }
+                else
+                {
+                    these_ogs.insert(this_og);
+                }
+
+                // start getting names
+                for (std::string this_line; std::getline(this_file, this_line); )
+                {
+                    if (this_line.front() == '\r' || this_line.front() == '\n') break;      // section break, finish processing this list
+
+                    char x = this_line.front();
+                    std::string str_rest = this_line.substr(1);
+                    if (x == '~')
+                    {
+                        // got a few different choices
+                        // try an integer first
+                        uint32_t this_og;
+                        if (get_uint(str_rest, &this_og))
+                        {
+                            these_ogs.insert(this_og);
+                            continue;
+                        }
+                        else if (str_rest.front() == '^' && !most_specific)
+                        {
+                            use_regex = true;
+                            match_name = str_rest;
+                            most_specific = true;
+                            continue;
+                        }
+                        else if (str_rest.front() == '%' && !most_specific)
+                        {
+                            partial_regex = true;
+                            match_name = str_rest.substr(1);
+                            most_specific = true;
+                            continue;
+                        }
+                        else if (!most_specific)
+                        {
+                            match_name = str_rest;
+                            most_specific = true;
+                        }
+                    }
+                    else if (x == '>')
+                    {
+                        // URL name choice
+                        kcURLNameChoice this_name(str_rest);
+                        these_names.push_back(this_name);
+                    }
+                    else if (x == '*')
+                    {
+                        // get int and repeat previous name choice that many times
+                        unsigned int n;
+                        if (get_uint(str_rest, &n))
+                        {
+                            for (int i = 0; i < n; i++)
+                            {
+                                these_names.push_back(these_names.back());
+                            }
+                        }
+                        else
+                        {
+                            // no int, treat like a regular name
+                            kcNameChoice this_name(this_line);
+                            these_names.push_back(this_name);
+                        }
+                    }
+                    else if (this_line.starts_with("++"))
+                    {
+                        // build this one with &these_names.back() as a prefix, don't add it to these_names itself
+                        str_rest = this_line.substr(2);
+                        if (str_rest.front() == '>')
+                        {
+                            // URL name choice as a suffix
+                            kcURLNameChoice this_name(str_rest.substr(1), &these_names.back());
+                        }
+                        else
+                        {
+                            kcNameChoice this_name(str_rest, &these_names.back());
+                        }
+                    }
+                    else
+                    {
+                        // build regular NameChoice and add it to the list
+                        kcNameChoice this_name(this_line);
+                        these_names.push_back(this_name);
+                    }
+                }
+
+                // build LotNamerMatch here using the flags and name list set above
+                if (string_only)
+                {
+                    kcLotNamerMatch this_match_def(priority++, these_names);
+                    these_matchdefs.push_back(this_match_def);
+                }
+                else if (partial_regex)
+                {
+                    kcPartialOccGroupRegexMatch this_match_def(priority++, these_ogs, std::regex(match_name, std::regex::optimize), these_names);
+                    these_matchdefs.push_back(this_match_def);
+                }
+                else if (use_regex)
+                {
+                    kcOccGroupRegexMatch this_match_def(priority++, these_ogs, std::regex(match_name, std::regex::optimize), these_names);
+                    these_matchdefs.push_back(this_match_def);
+                }
+                else if (match_name.length())
+                {
+                    kcOccGroupStringMatch this_match_def(priority++, these_ogs, match_name, these_names);
+                    these_matchdefs.push_back(this_match_def);
+                }
+                else
+                {
+                    kcOccGroupLotNamerMatch this_match_def(priority++, these_ogs, these_names);
+                    these_matchdefs.push_back(this_match_def);
+                }
+            }
+            else if (x == '-')
+            {
+                // check for integer, then start exclusions list
+                uint32_t this_og;
+                if (!get_uint(this_hdr.substr(1), &this_og)) continue;
+
+                std::vector<std::string> this_list;
+                for (std::string this_line; std::getline(this_file, this_line); )
+                {
+                    if (this_line.front() == '\r' || this_line.front() == '\n') break;      // section break, finish processing this list
+
+                    this_list.push_back(this_line);
+                }
+
+                kcLotNamerExclusions this_def(this_og, this_list);
+                these_matchdefs.push_back(this_def);
+            }
+        }
+        return these_matchdefs;
     }
 
     std::vector<std::string> checkIncludes(pathlib::path this_filep)
     {
         // read a file, but just check for includes for now, we'll parse the namedefs on second pass
+        if (!pathlib::is_regular_file(this_filep)) return;      // somehow didn't get a regular file to read
+
+        std::vector<std::string> this_includes;
+        std::ifstream this_file(this_filep);
+        for (std::string this_line; std::getline(this_file, this_line); )
+        {
+            itrim(this_line);       // trim whitespace
+            if (this_line.front() == '<')
+            {
+                this_includes.push_back(this_line.substr(1));
+            }
+        }
+
+        return this_includes;
     }
 
     bool checkIncludesRecursive(pathlib::path this_folder, pathlib::path this_filep, std::unordered_map<std::string, pathlib::path> &inc_map, std::vector<std::string> &inc_list)
@@ -1339,11 +1887,6 @@ protected:
 
         // no match
         return "";
-    }
-
-    std::vector<kcLotNamerMatch> parseOne(pathlib::path this_filep)
-    {
-        // read a file and a return a vector of name match definitions to be sorted by the caller based on their flags
     }
 
     void RandomizeAll() { }
